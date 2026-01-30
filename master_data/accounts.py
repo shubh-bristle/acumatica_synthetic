@@ -6,6 +6,9 @@ from config.settings import NUM_ACCOUNTS
 def accounts():
     account_types = ["Asset", "Liability", "Income", "Expense"]
 
+    # Generate n unique random numbers starting from 100000
+    ids = random.sample(range(100000, 100000 + NUM_ACCOUNTS*10), NUM_ACCOUNTS)
+
     descriptions = {
         "Asset": "Asset account used to record company owned resources",
         "Liability": "Liability account used to record company obligations",
@@ -15,14 +18,16 @@ def accounts():
 
     rows = []
 
-    for _ in range(NUM_ACCOUNTS):
+    for acc_id in ids:
         acc_type = random.choice(account_types)
+
         rows.append({
-            "AccountCD": str(uuid.uuid4()),
+            "AccountCD": acc_id,   # random unique ID
             "Description": descriptions[acc_type],
             "Type": acc_type,
             "Active": True
         })
+        
 
     return pd.DataFrame(rows)
 
