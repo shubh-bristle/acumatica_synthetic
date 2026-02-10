@@ -246,103 +246,71 @@ def branch(ledger_df):
 
 def warehouse(branch_df):
     """
-    Generates 200 realistic production style warehouse records
-    with randomized descriptions based on branch role.
-    Pattern: WH_<BranchCD>_<NNN>
+    Generates warehouse records with business rules applied:
+    1. HQ branches cannot have Industrial / Secure / Waste warehouses
+    2. Only ONE Secure Storage warehouse per branch
     """
 
     warehouses = []
     warehouse_counter = 1
 
-    # Expanded description pools by branch category
-    branch_description_map = {
-        "HQ": [
-            "Primary warehouse supporting headquarters operations",
-            "Secondary warehouse supporting headquarters operations",
-            "Central storage facility for corporate inventory",
-            "Headquarters logistics and fulfillment warehouse",
-            "Corporate inventory consolidation warehouse",
-            "Centralized supply chain management warehouse",
-            "Corporate distribution support warehouse",
-            "Executive operations support warehouse"
-        ],
-        "DC": [
-            "Primary distribution center warehouse",
-            "Overflow distribution warehouse",
-            "Regional distribution warehouse",
-            "High volume order fulfillment warehouse",
-            "Inbound and outbound logistics warehouse",
-            "Cross dock distribution warehouse",
-            "Regional shipping and receiving warehouse",
-            "Ecommerce order processing warehouse",
-            "Customer delivery staging warehouse"
-        ],
-        "MFG": [
-            "Manufacturing raw materials warehouse",
-            "Manufacturing finished goods warehouse",
-            "Manufacturing work in progress warehouse",
-            "Production staging and supply warehouse",
-            "Production input materials warehouse",
-            "Assembly line supply warehouse",
-            "Quality inspection holding warehouse",
-            "Manufacturing logistics support warehouse"
-        ],
-        "STORE": [
-            "Retail backroom inventory warehouse",
-            "Retail replenishment support warehouse",
-            "Retail overflow stock warehouse",
-            "Store level stock handling warehouse",
-            "Retail seasonal inventory warehouse",
-            "Retail receiving and storage warehouse"
-        ]
-    }
-
-    # Expanded default description pool
-    default_descriptions = [
-        "Primary warehouse supporting branch operations",
-        "Secondary warehouse supporting branch operations",
-        "Local inventory storage warehouse",
-        "Regional operations support warehouse",
-        "Inbound inventory handling warehouse",
-        "Outbound order fulfillment warehouse",
-        "General purpose storage warehouse",
-        "Operational supply warehouse",
-        "Inventory buffer storage warehouse",
-        "Logistics support warehouse",
-        "Materials handling and storage warehouse",
-        "Branch level inventory consolidation warehouse",
-        "Temporary inventory holding warehouse",
-        "Distribution support storage warehouse"
-    ]
+    # Track Secure warehouses per branch
+    secure_seen = set()
 
     for _, branch in branch_df.iterrows():
         branch_cd = branch["BranchCD"]
 
-        # Determine branch type prefix
-        branch_type = "".join([c for c in branch_cd if not c.isdigit()])
+        # Detect HQ
+        is_hq = branch_cd.startswith("HQ")
 
-        description_pool = branch_description_map.get(
-            branch_type,
-            default_descriptions
-        )
-
-        # Randomize number of warehouses per branch
         num_warehouses = random.randint(1, 3)
 
         for _ in range(num_warehouses):
-            if warehouse_counter > 200:
+            if warehouse_counter > 210:
                 break
 
+            # --- Storage category selection ---
+            storage_category = random.choice([
+                "Ambient",
+                "Restricted",
+                "Climate-Control",
+                "Industrial",
+                "Waste",
+                "Secure",
+                "Off-site"
+            ])
+
+            # -------------------------------
+            # RULE 1: HQ STORAGE RESTRICTION
+            # -------------------------------
+            if is_hq and storage_category in {"Industrial", "Secure", "Waste", "Off-site"}:
+                continue  # skip invalid HQ warehouse
+
+            # ------------------------------------
+            # RULE 2: SECURE STORAGE DEDUPLICATION
+            # ------------------------------------
+            if storage_category == "Secure":
+                if branch_cd in secure_seen:
+                    continue
+                secure_seen.add(branch_cd)
+
             warehouses.append({
-                "WarehouseCD": f"WH_{branch_cd}_{warehouse_counter:03}",
-                "Description": random.choice(description_pool),
+                "WarehouseCD": f"WH-{branch_cd}-{warehouse_counter:04}",
+                "WarehouseName": f"{branch_cd} {storage_category} Storage",
+                "WarehouseType": (
+                    "Fulfillment" if storage_category in {"Secure", "Restricted", "Climate-Cntrl"}
+                    else "Distribution"
+                ),
+                "StorageCategory": storage_category,
+                "CapacityClass": random.choice(["Small", "Medium", "Large"]),
+                "Description": f"{storage_category} storage location for branch logistics.",
                 "BranchCD": branch_cd,
                 "Active": True
             })
 
             warehouse_counter += 1
 
-        if warehouse_counter > 200:
+        if warehouse_counter > 210:
             break
 
     return pd.DataFrame(warehouses)
@@ -739,8 +707,15 @@ def customers(customer_class_df, terms_df):
 
 def vendors(terms_df):
     """
-    Generates realistic Vendor master data with mandatory fields:
-      VendorCD, VendorName, TermsID, Active
+    Generates Acumatica-safe Vendor master data.
+
+    Output columns:
+      VendorCD (unique)
+      VendorName
+      VendorClassID
+      TermsID
+      CurrencyID
+      Active
 
     Interrelationship:
       Terms.TermsID ← Vendor.TermsID
@@ -748,20 +723,44 @@ def vendors(terms_df):
 
     vendors_list = []
 
-    for i in range(NUM_VENDORS):
-        # Generate unique VendorCD like VEND000001
-        vendor_cd = f"VEND{i+1:06}"
+    # ---- CONFIG (internal, no change to function call) ----
+    VENDOR_CLASSES = [
+        "RAW_MATERIAL",
+        "SERVICES",
+        "UTILITIES",
+        "LOGISTICS",
+        "CAPEX"
+    ]
 
-        # Generate realistic company name using Faker
+    ALLOWED_CURRENCIES = ["USD", "EUR", "GBP", "INR", "AED"]
+
+    for i in range(NUM_VENDORS):
+        # Autonumbered, collision-proof
+        vendor_cd = f"VND{i+1:06}"
+
         vendor_name = fake.company()
 
-        # Pick a random TermsID from the Terms table
-        terms_id = random.choice(terms_df["TermsID"])
+        # Bias toward credit terms (NET30-like)
+        terms_id = random.choices(
+            terms_df["TermsID"],
+            weights=[
+                25 if t.upper() in ("NET30", "NET45", "NET60") else
+                15 if t.upper() in ("2P10N30", "NET7") else
+                5   # PREPAID / COD / IMMEDIATE
+                for t in terms_df["TermsID"]
+            ]
+        )[0]
+
+        vendor_class_id = random.choice(VENDOR_CLASSES)
+
+        currency_id = random.choice(ALLOWED_CURRENCIES)
 
         vendors_list.append({
             "VendorCD": vendor_cd,
             "VendorName": vendor_name,
+            "VendorClassID": vendor_class_id,
             "TermsID": terms_id,
+            "CurrencyID": currency_id,
             "Active": True
         })
 
@@ -1148,27 +1147,113 @@ def journal_transactions(
     return pd.DataFrame(journal_entries)
 
 def terms():
-    """
-    Generates realistic Acumatica payment terms dynamically.
-    """
-    rows = []
-    used = set()
-
-    while len(rows) < NUM_TERMS:
-        days = random.choice([0, 7, 10, 15, 30, 45, 60])
-        terms_id = f"NET{days}"
-
-        if terms_id in used:
-            continue
-
-        used.add(terms_id)
-
-        rows.append({
-            "TermsID": terms_id,
-            "Description": f"Payment is due for Net {days} Days",
-            "DueDays": days,
+    rows = [
+        # -------------------------------------------------
+        # Immediate / Cash Terms
+        # -------------------------------------------------
+        {
+            "TermsID": "COD",
+            "Description": "Cash on Delivery",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 0,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
             "Active": True
-        })
+        },
+        {
+            "TermsID": "PREPAID",
+            "Description": "Paid in advance before shipment",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 0,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+        {
+            "TermsID": "IMMEDIATE",
+            "Description": "Payment due immediately upon invoice",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 0,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+
+        # -------------------------------------------------
+        # Standard Net Terms (Manufacturing / Logistics)
+        # -------------------------------------------------
+        {
+            "TermsID": "NET7",
+            "Description": "Net 7 days",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 7,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+        {
+            "TermsID": "NET30",
+            "Description": "Net 30 days",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 30,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+        {
+            "TermsID": "NET45",
+            "Description": "Net 45 days",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 45,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+        {
+            "TermsID": "NET60",
+            "Description": "Net 60 days",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 60,
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        },
+
+        # -------------------------------------------------
+        # Discount Term (Fully Functional)
+        # -------------------------------------------------
+        {
+            "TermsID": "2P10N30",
+            "Description": "2% discount if paid within 10 days, otherwise Net 30",
+            "DueDayType": "FixedNumberOfDays",
+            "DueDays": 30,
+            "DiscountDayType": "FixedNumberOfDays",
+            "DiscountPercent": 2.00,
+            "DiscountDays": 10,
+            "Active": True
+        },
+
+        # -------------------------------------------------
+        # End of Month (Correct Acumatica Logic)
+        # -------------------------------------------------
+        {
+            "TermsID": "EOM",
+            "Description": "Payment due at end of month",
+            "DueDayType": "EndOfMonth",
+            "DueDays": 0,  # MUST be 0 for EOM logic
+            "DiscountDayType": None,
+            "DiscountPercent": 0.0,
+            "DiscountDays": 0,
+            "Active": True
+        }
+    ]
 
     return pd.DataFrame(rows)
 
