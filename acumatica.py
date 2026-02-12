@@ -1180,43 +1180,91 @@ def purchase_receipts(purchase_orders_df, warehouse_df):
     return pd.DataFrame(receipts)
 
 
-def bills(vendors_df, branch_df):
-    """
-    Generates realistic AP Bill data.
-
-    Mandatory fields:
-      RefNbr, VendorCD, BillDate, BranchCD
-
-    Interrelationship:
-      Vendor.VendorCD ← Bill.VendorCD
-    """
+def bills(vendors_df, branch_df, receipts_df, purchase_orders_df):
 
     bills_list = []
     used_ref_nbrs = set()
 
+    status_pool = (
+        ["Balanced"] * 70 +
+        ["Released"] * 15 +
+        ["Closed"] * 10 +
+        ["Hold"] * 5
+    )
+
+    # PO → Branch resolution (authoritative)
+    po_branch_map = (
+        purchase_orders_df
+        .set_index("OrderNbr")["BranchCD"]
+        .to_dict()
+    )
+
+    # ReceiptNbr → ReceiptDate lookup (for BillDate enforcement)
+    receipt_date_map = (
+        receipts_df
+        .set_index("ReceiptNbr")["ReceiptDate"]
+        .to_dict()
+        if not receipts_df.empty
+        else {}
+    )
+
     def generate_ref_nbr(branch_cd, bill_date):
         while True:
-            suffix = ''.join(
-                random.choices(string.ascii_uppercase + string.digits, k=4)
-            )
-            ref_nbr = f"BILL-{branch_cd}-{bill_date.year}-{suffix}"
-            if ref_nbr not in used_ref_nbrs:
-                used_ref_nbrs.add(ref_nbr)
-                return ref_nbr
+            suf = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+            nbr = f"BILL-{branch_cd}-{bill_date.year}-{suf}"
+            if nbr not in used_ref_nbrs:
+                used_ref_nbrs.add(nbr)
+                return nbr
 
     for _ in range(NUM_BILLS):
-        vendor_cd = random.choice(vendors_df["VendorCD"])
-        branch_cd = random.choice(branch_df["BranchCD"])
-        bill_date = fake.date_between(start_date="-12M", end_date="today")
+
+        vendor = vendors_df.sample(1).iloc[0]
+
+        link_to_receipt = not receipts_df.empty and random.random() < 0.65
+
+        if link_to_receipt:
+            receipt = receipts_df.sample(1).iloc[0]
+            receipt_nbr = receipt["ReceiptNbr"]
+
+            # Branch must come from PO linked to receipt
+            branch_cd = po_branch_map.get(
+                receipt["OrderNbr"],
+                random.choice(branch_df["BranchCD"])
+            )
+
+            # ✅ BillDate ≥ ReceiptDate
+            receipt_date = pd.to_datetime(receipt_date_map[receipt_nbr])
+            bill_date = fake.date_between(
+                start_date=receipt_date,
+                end_date=receipt_date + timedelta(days=90)
+            )
+
+        else:
+            receipt_nbr = None
+            branch_cd = random.choice(branch_df["BranchCD"])
+
+            bill_date = fake.date_between(
+                start_date="-24M",
+                end_date="today"
+            )
+
+        # ✅ Always 2-decimal financial precision
+        total_amount = round(random.uniform(500, 25000), 2)
 
         bills_list.append({
             "RefNbr": generate_ref_nbr(branch_cd, bill_date),
-            "VendorCD": vendor_cd,
+            "VendorCD": vendor["VendorCD"],
+            "VendorRef": f"INV-{random.randint(100000, 999999)}",
             "BillDate": bill_date,
-            "BranchCD": branch_cd
+            "BranchCD": branch_cd,
+            "CurrencyID": vendor["CurrencyID"],
+            "ReceiptNbr": receipt_nbr,
+            "TotalAmount": total_amount,
+            "Status": random.choice(status_pool)
         })
 
     return pd.DataFrame(bills_list)
+
 
 def journal_transactions(
     ledger_df, branch_df, account_df, subaccount_df, currency_df
@@ -1571,7 +1619,7 @@ def main():
     )
 
     bill = deduplicate(
-        bills(vend, br),
+        bills(vend, br, pr,po),
         ["RefNbr"],
         "Bill"
     )
