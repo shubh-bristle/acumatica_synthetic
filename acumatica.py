@@ -1101,44 +1101,84 @@ def purchase_order_lines(po_df, stk_df, nstk_df, wh_df, proj_df):
 
 def purchase_receipts(purchase_orders_df, warehouse_df):
     """
-    Generates realistic PurchaseReceipt data.
+    Generates realistic PurchaseReceipt header data (migration-safe).
 
-    Mandatory fields:
-      ReceiptNbr, VendorCD, WarehouseCD, ReceiptDate
-
-    Interrelationships:
-      PurchaseOrder.OrderNbr     ← PurchaseReceipt.OrderNbr
-      Warehouse.WarehouseCD      ← PurchaseReceipt.WarehouseCD
+    Key Fixes:
+    - Warehouse belongs to same Branch as PO
+    - Status skewed toward Open (migration-friendly)
+    - Returns handled explicitly
     """
 
-    receipts_list = []
+    receipts = []
     used_receipt_nbrs = set()
+
+    # Pre-group warehouses by BranchCD (CRITICAL)
+    wh_by_branch = (
+        warehouse_df
+        .groupby("BranchCD")["WarehouseCD"]
+        .apply(list)
+        .to_dict()
+    )
 
     def generate_receipt_nbr(receipt_date):
         while True:
             suffix = ''.join(
                 random.choices(string.ascii_uppercase + string.digits, k=4)
             )
-            receipt_nbr = f"PR-{receipt_date.year}-{suffix}"
-            if receipt_nbr not in used_receipt_nbrs:
-                used_receipt_nbrs.add(receipt_nbr)
-                return receipt_nbr
+            nbr = f"PR-{receipt_date.year}-{suffix}"
+            if nbr not in used_receipt_nbrs:
+                used_receipt_nbrs.add(nbr)
+                return nbr
 
     for _, po in purchase_orders_df.iterrows():
+
+        branch = po["BranchCD"]
+
+        # ✅ Branch-safe warehouse selection
+        warehouses = wh_by_branch.get(branch)
+        if not warehouses:
+            continue  # or raise, depending on strictness
+
+        warehouse_cd = random.choice(warehouses)
+
         receipt_date = fake.date_between(
             start_date=po["OrderDate"],
             end_date="today"
         )
 
-        receipts_list.append({
+        # Receipt vs Return (small %)
+        is_return = random.random() < 0.05
+
+        receipt_type = "Return" if is_return else "Receipt"
+
+        qty = round(random.uniform(1, 100), 2)
+        amount = round(qty * random.uniform(20, 500), 2)
+
+        if is_return:
+            qty *= -1
+            amount *= -1
+            status = "Released"
+        else:
+            # Migration-safe status distribution
+            status = random.choices(
+                ["Open", "Released"],
+                weights=[85, 15]
+            )[0]
+
+        receipts.append({
             "ReceiptNbr": generate_receipt_nbr(receipt_date),
-            "OrderNbr": po["OrderNbr"],                 # Relationship preserved
+            "OrderNbr": po["OrderNbr"],
             "VendorCD": po["VendorCD"],
-            "WarehouseCD": random.choice(warehouse_df["WarehouseCD"]),
-            "ReceiptDate": receipt_date
+            "WarehouseCD": warehouse_cd,
+            "ReceiptDate": receipt_date,
+            "ReceiptType": receipt_type,
+            "Status": status,
+            "ControlQty": qty,
+            "TotalAmount": amount
         })
 
-    return pd.DataFrame(receipts_list)
+    return pd.DataFrame(receipts)
+
 
 def bills(vendors_df, branch_df):
     """
