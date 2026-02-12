@@ -1026,38 +1026,78 @@ def sales_invoices(customers_df, branch_df):
     return pd.DataFrame(invoices_list)
 
 def purchase_orders(vendors_df, branch_df):
-    """
-    Interrelationship:
-      Vendor.VendorCD ← PurchaseOrder.VendorCD
-    """
+    rows = []
+    used = set()
 
-    purchase_orders_list = []
-    used_order_nbrs = set()
-
-    def generate_order_nbr(branch_cd, order_date):
+    def gen_po(branch_cd, date):
         while True:
-            suffix = ''.join(
-                random.choices(string.ascii_uppercase + string.digits, k=4)
-            )
-            order_nbr = f"PO-{branch_cd}-{order_date.year}-{suffix}"
-            if order_nbr not in used_order_nbrs:
-                used_order_nbrs.add(order_nbr)
-                return order_nbr
+            suf = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+            nbr = f"PO-{branch_cd}-{date.year}-{suf}"
+            if nbr not in used:
+                used.add(nbr)
+                return nbr
 
     for _ in range(NUM_PURCHASE_ORDERS):
-        vendor_cd = random.choice(vendors_df["VendorCD"])
-        branch_cd = random.choice(branch_df["BranchCD"])
-        order_date = fake.date_between(start_date="-12M", end_date="today")
+        vend = random.choice(vendors_df["VendorCD"])
+        br = random.choice(branch_df["BranchCD"])
+        date = fake.date_between("-12M", "today")
 
-        purchase_orders_list.append({
-            "OrderNbr": generate_order_nbr(branch_cd, order_date),
-            "OrderType": "PO", # Purchase Order
-            "VendorCD": vendor_cd,
-            "OrderDate": order_date,
-            "BranchCD": branch_cd
+        rows.append({
+            "OrderType": random.choices(
+                ["RO", "DP"],
+                weights=[0.95, 0.05]
+            )[0],
+            "OrderNbr": gen_po(br, date),
+            "VendorCD": vend,
+            "Status": random.choice(["Open", "Released", "On Hold"]),
+            "OrderDate": date,
+            "ExpectedDate": date + timedelta(days=random.randint(5, 45)),
+            "BranchCD": br,
+            "TermsID": random.choice(["2P10N30", "NET7", "PREPAID", "EOM"]),
+            "CurrencyCD": random.choice(["USD", "GBP", "EUR"]),
         })
 
-    return pd.DataFrame(purchase_orders_list)
+    return pd.DataFrame(rows)
+
+
+def purchase_order_lines(po_df, stk_df, nstk_df, wh_df, proj_df):
+    rows = []
+
+    items = pd.concat([stk_df, nstk_df], ignore_index=True)
+
+    # Branch → Warehouses
+    wh_map = (
+        wh_df
+        .groupby("BranchCD")["WarehouseCD"]
+        .apply(list)
+        .to_dict()
+    )
+
+    for _, po in po_df.iterrows():
+        branch = po["BranchCD"]
+        warehouses = wh_map.get(branch, [])
+
+        if not warehouses:
+            continue
+
+        for line_nbr in range(1, random.randint(2, 6)):
+            item = items.sample(1).iloc[0]
+
+            rows.append({
+                "OrderType": po["OrderType"],
+                "OrderNbr": po["OrderNbr"],
+                "LineNbr": line_nbr,
+                "InventoryID": item["InventoryCD"],
+                "OrderQty": random.randint(1, 50),
+                "CuryUnitCost": round(random.uniform(10, 500), 2),
+                "WarehouseCD": random.choice(warehouses),
+                "ProjectID": random.choice(
+                    proj_df["ProjectCD"].tolist() + [None]
+                )
+            })
+
+    return pd.DataFrame(rows)
+
 
 def purchase_receipts(purchase_orders_df, warehouse_df):
     """
@@ -1471,9 +1511,31 @@ def main():
     shp  = deduplicate(shipments(so, wh), ["ShipmentNbr"], "Shipment")
     inv  = deduplicate(sales_invoices(cust, br), ["InvoiceNbr"], "SalesInvoice")
     # Purchase Orders, Receipts, Bills
-    po   = deduplicate(purchase_orders(vend, br), ["OrderNbr"], "PurchaseOrder")
-    pr   = deduplicate(purchase_receipts(po, wh), ["ReceiptNbr"], "PurchaseReceipt")
-    bill = deduplicate(bills(vend, br), ["RefNbr"], "Bill")
+
+    po = deduplicate(
+        purchase_orders(vend, br),
+        ["OrderNbr"],
+        "PurchaseOrder"
+    )
+
+    pol = deduplicate(
+        purchase_order_lines(po, stk, nstk, wh, proj),
+        ["OrderNbr", "LineNbr"],
+        "PurchaseOrderLine"
+    )
+
+    pr = deduplicate(
+        purchase_receipts(po, wh),
+        ["ReceiptNbr"],
+        "PurchaseReceipt"
+    )
+
+    bill = deduplicate(
+        bills(vend, br),
+        ["RefNbr"],
+        "Bill"
+    )
+
     # General Ledger Transactions
     gl   = deduplicate(
     journal_transactions(led, br, acc, sub, cur),
@@ -1501,7 +1563,7 @@ def main():
         "SalesOrder.csv": so,
         "Shipment.csv": shp,
         "SalesInvoice.csv": inv,
-        "PurchaseOrder.csv": po,
+        "PurchaseOrder.csv": pol,
         "PurchaseReceipt.csv": pr,
         "Bill.csv": bill,
         "JournalTransaction.csv": gl,
