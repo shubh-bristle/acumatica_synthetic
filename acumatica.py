@@ -4,7 +4,7 @@ from faker import Faker
 import pandas as pd
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pycountry
 
 fake = Faker()
@@ -891,19 +891,19 @@ def projects(customers_df, branch_df):
 # ================= TRANSACTIONS =================
 
 def sales_orders(customers_df, branch_df):
-    """
-    Interrelationship:
-      Customer.CustomerCD ← SalesOrder.CustomerCD
-    """
+    global SALES_ORDER_LINES
 
     sales_orders_list = []
+    sales_order_lines = []
+    ORDER_TYPES = ["SO", "CM", "IN"]
     used_order_nbrs = set()
+
+    STATUSES = ["Open", "Completed", "Cancelled", "Backordered"]
+    SHIP_VIAS = ["DHL", "FedEx", "UPS", "BlueDart"]
 
     def generate_order_nbr(branch_cd, order_date):
         while True:
-            suffix = ''.join(
-                random.choices(string.ascii_uppercase + string.digits, k=4)
-            )
+            suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
             year = order_date.year
             order_nbr = f"SO-{branch_cd}-{year}-{suffix}"
             if order_nbr not in used_order_nbrs:
@@ -913,52 +913,84 @@ def sales_orders(customers_df, branch_df):
     for _ in range(NUM_SALES_ORDERS):
         customer_cd = random.choice(customers_df["CustomerCD"])
         branch_cd = random.choice(branch_df["BranchCD"])
-        order_date = fake.date_between(start_date="-12M", end_date="today")
+        order_date = fake.date_between(start_date="-24M", end_date="today")
 
+        order_nbr = generate_order_nbr(branch_cd, order_date)
+
+        
+
+        # ----- HEADER -----
         sales_orders_list.append({
-            "OrderNbr": generate_order_nbr(branch_cd, order_date),
-            "OrderType": "SO",  #Sales Order
+            "OrderNbr": order_nbr,
+            "OrderType": random.choices(
+                ORDER_TYPES, weights=[70, 15, 15]
+            )[0],
             "CustomerCD": customer_cd,
             "OrderDate": order_date,
-            "BranchCD": branch_cd
+            "BranchCD": branch_cd,
+            "Status": random.choices(
+                STATUSES, weights=[50, 35, 10, 5]
+            )[0],
+            "ShipVia": random.choice(SHIP_VIAS),
+            "RequestedDate": order_date + timedelta(days=random.randint(2, 14)),
+            "ProjectID": None   # safe default, can be populated later
         })
+
+        # ----- LINES (HIDDEN FROM CALLER) -----
+        line_count = random.randint(1, 5)
+        for line_nbr in range(1, line_count + 1):
+            sales_order_lines.append({
+                "OrderNbr": order_nbr,
+                "LineNbr": line_nbr,
+                "InventoryID": f"ITEM-{random.randint(1000,9999)}",
+                "OrderQty": random.randint(1, 20),
+                "UnitPrice": round(random.uniform(10, 500), 2)
+            })
+
+    SALES_ORDER_LINES = pd.DataFrame(sales_order_lines)
 
     return pd.DataFrame(sales_orders_list)
 
+
 def shipments(sales_orders_df, warehouse_df):
-    """
-    Interrelationships:
-      SalesOrder.OrderNbr     ← Shipment.OrderNbr
-      Warehouse.WarehouseCD   ← Shipment.WarehouseCD
-    """
+    rows = []
+    used = set()
 
-    shipments_list = []
-    used_shipment_nbrs = set()
-
-    def generate_shipment_nbr(shipment_date):
+    def gen_ship(date):
         while True:
-            suffix = ''.join(
-                random.choices(string.ascii_uppercase + string.digits, k=4)
-            )
-            shipment_nbr = f"SHP-{shipment_date.year}-{suffix}"
-            if shipment_nbr not in used_shipment_nbrs:
-                used_shipment_nbrs.add(shipment_nbr)
-                return shipment_nbr
+            suf = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+            nbr = f"SHP-{date.year}-{suf}"
+            if nbr not in used:
+                used.add(nbr)
+                return nbr
+
+    def extract_branch(order_nbr):
+        # Example: SO-IN-BLR-2025-BKWK → IN-BLR
+        parts = order_nbr.split("-")
+        return "-".join(parts[1:3])
 
     for _, so in sales_orders_df.iterrows():
-        shipment_date = fake.date_between(
-            start_date=so["OrderDate"],
-            end_date="today"
-        )
+        ship_date = fake.date_between(so["OrderDate"], "today")
+        branch_cd = extract_branch(so["OrderNbr"])
 
-        shipments_list.append({
-            "ShipmentNbr": generate_shipment_nbr(shipment_date),
+        # Filter warehouses belonging to same branch
+        eligible_wh = warehouse_df[
+            warehouse_df["WarehouseCD"].str.contains(branch_cd)
+        ]
+
+        # Fallback only if no warehouse exists for that branch
+        if eligible_wh.empty:
+            eligible_wh = warehouse_df
+
+        rows.append({
+            "ShipmentNbr": gen_ship(ship_date),
             "OrderNbr": so["OrderNbr"],
-            "WarehouseCD": random.choice(warehouse_df["WarehouseCD"]),
-            "ShipmentDate": shipment_date
+            "WarehouseCD": random.choice(eligible_wh["WarehouseCD"].tolist()),
+            "ShipmentDate": ship_date
         })
 
-    return pd.DataFrame(shipments_list)
+    return pd.DataFrame(rows)
+
 
 def sales_invoices(customers_df, branch_df):
     """
