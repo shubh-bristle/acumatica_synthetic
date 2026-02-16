@@ -1,3 +1,4 @@
+from math import ceil
 import string
 import uuid
 from faker import Faker
@@ -57,21 +58,13 @@ PREFERRED_CURRENCIES = {
     "SAR", "AUD", "PKR", "BRL", "EGP"
 }
 
-def weighted_currency_choice(currency_df):
-    """
-    Returns a currency ID with higher probability
-    for preferred Acumatica currencies.
-    """
+def build_currency_weights(currency_df):
+    currency_ids = currency_df["CurrencyID"].tolist()
     weights = [
-        5 if row["CurrencyID"] in PREFERRED_CURRENCIES else 1
-        for _, row in currency_df.iterrows()
+        5 if cid in PREFERRED_CURRENCIES else 1
+        for cid in currency_ids
     ]
-
-    return random.choices(
-        currency_df["CurrencyID"].tolist(),
-        weights=weights,
-        k=1
-    )[0]
+    return currency_ids, weights
 
 
 # ================= MASTER DATA =================
@@ -184,7 +177,7 @@ def ledger(currency_df):
             "Description": description,
             "BalanceType": balance_type,
             "CurrencyID": (
-                weighted_currency_choice(currency_df)
+                build_currency_weights(currency_df)
                 if balance_type in ["Actual", "Budget"]
                 else None
             ),
@@ -194,55 +187,154 @@ def ledger(currency_df):
     return pd.DataFrame(ledgers)
 
 
-def branch(ledger_df):
-    """
-    Generates 100 realistic Acumatica branches
-    and assigns them ONLY to Actual ledgers.
-    """
-
-    # Only Actual ledgers can be assigned to branches
-    actual_ledgers = ledger_df[
-        ledger_df["BalanceType"] == "Actual"
-    ]["LedgerCD"].tolist()
-
-    # Base branch templates
-    base_branches = [
-        ("HQ", "Headquarters"),
-        ("US_EAST", "US East Regional Office"),
-        ("US_WEST", "US West Regional Office"),
-        ("EMEA", "Europe Middle East Africa"),
-        ("APAC", "Asia Pacific Regional Office"),
-        ("LATAM", "Latin America Regional Office"),
-        ("MFG", "Manufacturing Plant"),
-        ("DC", "Distribution Center"),
-        ("STORE", "Retail Store"),
-        ("SERVICES", "Professional Services Division"),
-        ("RND", "Research and Development"),
-        ("SHARED", "Shared Services")
+def branches(ledger_df):
+    CORPORATE_ACTIONS = [
+    "directs executive leadership",
+    "oversees corporate governance",
+    "drives strategic planning initiatives",
+    "manages enterprise financial oversight"
     ]
 
-    branches = []
-    branch_counter = 1
+    MANUFACTURING_ACTIONS = [
+        "oversees large-scale production",
+        "manages industrial fabrication processes",
+        "coordinates assembly operations",
+        "leads quality-controlled manufacturing cycles"
+    ]
 
-    # Generate branches until we reach 100
-    while len(branches) < 100:
-        for code, desc in base_branches:
-            if len(branches) >= 100:
-                break
+    DISTRIBUTION_ACTIONS = [
+        "manages high-volume warehousing",
+        "coordinates inventory allocation",
+        "optimizes outbound fulfillment workflows",
+        "oversees regional stock distribution"
+    ]
 
-            branch_cd = f"{code}{branch_counter:02}"
-            description = f"{desc} {branch_counter:02}"
+    SERVICE_ACTIONS = [
+        "delivers technical support services",
+        "provides field maintenance operations",
+        "coordinates customer assistance programs",
+        "manages service-level performance delivery"
+    ]
 
-            branches.append({
-                "BranchCD": branch_cd,
-                "Description": description,
-                "LedgerCD": random.choice(actual_ledgers),
-                "Active": True
-            })
+    OPERATIONS_ACTIONS = [
+        "coordinates cross-functional business processes",
+        "monitors operational performance metrics",
+        "drives efficiency improvement initiatives",
+        "oversees process optimization programs"
+    ]
 
-            branch_counter += 1
+    LOGISTICS_ACTIONS = [
+        "manages transportation planning",
+        "coordinates freight movement operations",
+        "oversees carrier network partnerships",
+        "controls inbound and outbound shipment execution"
+    ]
 
-    return pd.DataFrame(branches)
+    SCOPE_PHRASES = [
+        "supporting domestic market demand",
+        "serving regional commercial operations",
+        "across key metropolitan areas",
+        "within its strategic geographic footprint",
+        "supporting multi-state distribution networks"
+    ]
+
+    # 🔥 Validate Ledger Relationship
+    valid_ledgers = ledger_df[
+        (ledger_df["BalanceType"] == "Actual") &
+        (ledger_df["Active"] == True)
+    ]["LedgerCD"].tolist()
+
+    if not valid_ledgers:
+        raise ValueError("No valid Actual ledgers found.")
+
+    BRANCH_TYPE_MAP = {
+        "HQ": "Corporate",
+        "MFG": "Manufacturing",
+        "DIST": "Distribution",
+        "SRV": "Service",
+        "OPS": "Operations",
+        "LOG": "Logistics"
+    }
+
+    LOCATION_MAP = {
+        "NY": ("New York", "North America"),
+        "TX": ("Texas", "North America"),
+        "CA": ("California", "North America"),
+        "FL": ("Florida", "North America"),
+        "CHI": ("Chicago", "North America"),
+        "NJ": ("New Jersey", "North America")
+    }
+
+    BASE_CURRENCY_MAP = {
+        "North America": "USD"
+    }
+
+    def generate_description(branch_type, branch_name, region):
+
+        action_map = {
+            "Corporate": CORPORATE_ACTIONS,
+            "Manufacturing": MANUFACTURING_ACTIONS,
+            "Distribution": DISTRIBUTION_ACTIONS,
+            "Service": SERVICE_ACTIONS,
+            "Operations": OPERATIONS_ACTIONS,
+            "Logistics": LOGISTICS_ACTIONS
+        }
+
+        action = random.choice(action_map[branch_type])
+        scope = random.choice(SCOPE_PHRASES)
+
+        description = (
+            f"{branch_name} {action}, {scope} across the {region} region."
+        )
+
+        return description
+
+
+    branch_rows = []
+    used_codes = set()
+
+    type_keys = list(BRANCH_TYPE_MAP.keys())
+    location_keys = list(LOCATION_MAP.keys())
+
+    while len(branch_rows) < NUM_BRANCHES:
+
+        type_code = random.choice(type_keys)
+        loc_code = random.choice(location_keys)
+
+        branch_cd = f"{type_code}-{loc_code}"
+
+        if branch_cd in used_codes:
+            continue
+
+        used_codes.add(branch_cd)
+
+        branch_type = BRANCH_TYPE_MAP[type_code]
+        location_name, region = LOCATION_MAP[loc_code]
+        base_currency = BASE_CURRENCY_MAP[region]
+
+        branch_name = f"{branch_type} - {location_name}"
+
+        description = generate_description(branch_type, branch_name, region)
+
+        branch_rows.append({
+            "BranchCD": branch_cd,
+            "BranchName": branch_name,
+            "BranchType": branch_type,
+            "Region": region,
+            "BaseCurrency": base_currency,
+            "LedgerCD": random.choice(valid_ledgers),  # 🔥 Now relational
+            "Description": description,
+            "Active": True
+        })
+
+    df = pd.DataFrame(branch_rows)
+
+    # 🔥 10% inactive
+    inactive_count = ceil(NUM_BRANCHES * 0.10)
+    inactive_indices = random.sample(list(df.index), inactive_count)
+    df.loc[inactive_indices, "Active"] = False
+
+    return df
 
 def warehouse(branch_df):
     """
@@ -1267,37 +1359,59 @@ def bills(vendors_df, branch_df, receipts_df, purchase_orders_df):
 
 
 def journal_transactions(ledger_df, branch_df, account_df, subaccount_df, currency_df):
+
     rows = []
 
-    actual_ledgers = ledger_df[ledger_df["BalanceType"] == "Actual"]["LedgerCD"]
+    actual_ledgers = ledger_df[
+        ledger_df["BalanceType"] == "Actual"
+    ]["LedgerCD"].tolist()
+
+    branch_list = branch_df["BranchCD"].tolist()
+    account_list = account_df["AccountCD"].tolist()
+    subaccount_list = subaccount_df["SubAccountCD"].tolist()
+
+    currency_ids, currency_weights = build_currency_weights(currency_df)
+
+    # 🔥 Precompute date range ONCE
+    today = datetime.today().date()
+    start_date = today - timedelta(days=365)
 
     for i in range(NUM_JOURNAL_TRANSACTIONS):
+
         batch_nbr = f"JB{i+1:06}"
         amount = round(random.uniform(100, 5000), 2)
+
+        currency = random.choices(
+            currency_ids,
+            weights=currency_weights,
+            k=1
+        )[0]
+
+        txn_date = start_date + timedelta(
+            days=random.randint(0, 365)
+        )
 
         common_fields = {
             "BatchNbr": batch_nbr,
             "LedgerCD": random.choice(actual_ledgers),
-            "BranchCD": random.choice(branch_df["BranchCD"]),
-            "CurrencyID": weighted_currency_choice(currency_df),
-            "TransactionDate": fake.date_between("-12M", "today"),
+            "BranchCD": random.choice(branch_list),
+            "CurrencyID": currency,
+            "TransactionDate": txn_date,
             "Active": True
         }
 
-        # Debit line (Expense / Asset)
         rows.append({
             **common_fields,
-            "AccountCD": random.choice(account_df["AccountCD"]),
-            "SubAccountCD": random.choice(subaccount_df["SubAccountCD"]),
+            "AccountCD": random.choice(account_list),
+            "SubAccountCD": random.choice(subaccount_list),
             "DebitAmt": amount,
             "CreditAmt": 0
         })
 
-        # Credit line (Cash / AP / Revenue)
         rows.append({
             **common_fields,
-            "AccountCD": random.choice(account_df["AccountCD"]),
-            "SubAccountCD": random.choice(subaccount_df["SubAccountCD"]),
+            "AccountCD": random.choice(account_list),
+            "SubAccountCD": random.choice(subaccount_list),
             "DebitAmt": 0,
             "CreditAmt": amount
         })
@@ -1567,7 +1681,7 @@ def main():
     # Currency → Ledger → Branch → Warehouse
     cur  = deduplicate(currency(), ["CurrencyID"], "Currency")
     led  = deduplicate(ledger(cur), ["LedgerCD"], "Ledger")
-    br   = deduplicate(branch(led), ["BranchCD"], "Branch")
+    br   = deduplicate(branches(led), ["BranchCD"], "Branch")
     wh   = deduplicate(warehouse(br), ["WarehouseCD"], "Warehouse")
     # Accounts & SubAccounts → ItemClass → UnitOfMeasure → StockItem & NonStockItem
     acc  = deduplicate(accounts(), ["AccountCD"], "Account")
