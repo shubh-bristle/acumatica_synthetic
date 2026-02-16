@@ -982,106 +982,166 @@ def projects(customers_df, branch_df):
 
 # ================= TRANSACTIONS =================
 
-def sales_orders(customers_df, branch_df):
-    global SALES_ORDER_LINES
+def sales_orders(customer_df, branch_df, inventory_df):
 
-    sales_orders_list = []
-    sales_order_lines = []
-    ORDER_TYPES = ["SO", "CM", "IN"]
-    used_order_nbrs = set()
+    header_rows = []
+    line_rows = []
 
-    STATUSES = ["Open", "Completed", "Cancelled", "Backordered"]
-    SHIP_VIAS = ["DHL", "FedEx", "UPS", "BlueDart"]
+    customers = customer_df["CustomerCD"].tolist()
+    branches = branch_df[branch_df["Active"] == True]["BranchCD"].tolist()
+    inventory = inventory_df[inventory_df["Active"] == True]
 
-    def generate_order_nbr(branch_cd, order_date):
-        while True:
-            suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-            year = order_date.year
-            order_nbr = f"SO-{branch_cd}-{year}-{suffix}"
-            if order_nbr not in used_order_nbrs:
-                used_order_nbrs.add(order_nbr)
-                return order_nbr
+    # 🔥 PERFORMANCE FIX (avoid .sample() in loop)
+    inventory_rows = inventory.to_dict("records")
 
-    for _ in range(NUM_SALES_ORDERS):
-        customer_cd = random.choice(customers_df["CustomerCD"])
-        branch_cd = random.choice(branch_df["BranchCD"])
-        order_date = fake.date_between(start_date="-24M", end_date="today")
+    ship_via_options = ["DHL", "FedEx", "UPS", "BlueDart"]
+    order_types = ["SO", "IN", "CM"]
 
-        order_nbr = generate_order_nbr(branch_cd, order_date)
+    start_date = datetime(2024, 1, 1)
 
-        
+    for i in range(NUM_SALES_ORDERS):
 
-        # ----- HEADER -----
-        sales_orders_list.append({
-            "OrderNbr": order_nbr,
-            "OrderType": random.choices(
-                ORDER_TYPES, weights=[70, 15, 15]
-            )[0],
-            "CustomerCD": customer_cd,
-            "OrderDate": order_date,
-            "BranchCD": branch_cd,
-            "Status": random.choices(
-                STATUSES, weights=[50, 35, 10, 5]
-            )[0],
-            "ShipVia": random.choice(SHIP_VIAS),
-            "RequestedDate": order_date + timedelta(days=random.randint(2, 14)),
-            "ProjectID": None   # safe default, can be populated later
-        })
+        branch_cd = random.choice(branches)
+        order_type = random.choice(order_types)
+        customer = random.choice(customers)
 
-        # ----- LINES (HIDDEN FROM CALLER) -----
-        line_count = random.randint(1, 5)
-        for line_nbr in range(1, line_count + 1):
-            sales_order_lines.append({
+        order_date = start_date + timedelta(days=random.randint(0, 730))
+
+        # ✅ Status Based On OrderType
+        if order_type == "SO":
+            status = random.choices(
+                ["Open", "Backordered", "Completed", "Cancelled"],
+                weights=[40, 25, 25, 10]
+            )[0]
+
+        elif order_type == "IN":
+            status = random.choices(
+                ["Open", "Released", "Voided"],
+                weights=[30, 60, 10]
+            )[0]
+
+        elif order_type == "CM":
+            status = random.choices(
+                ["Open", "Released", "Closed"],
+                weights=[40, 40, 20]
+            )[0]
+
+        # ✅ RequestedDate only for SO
+        if order_type == "SO":
+            requested_date = order_date + timedelta(days=random.randint(3, 14))
+            requested_date_str = requested_date.strftime("%d-%m-%Y")
+        else:
+            requested_date_str = None
+
+        order_nbr = f"{order_type}-{branch_cd}-{order_date.year}-{random.randint(1000,9999)}"
+
+        # 🔥 Generate Lines (1–5 per order)
+        num_lines = random.randint(1, 5)
+        order_total = 0
+
+        for line_nbr in range(1, num_lines + 1):
+
+            # ✅ FAST inventory selection
+            item = random.choice(inventory_rows)
+            inventory_id = item["InventoryCD"]
+
+            qty = random.randint(1, 20)
+            unit_price = round(random.uniform(50, 500), 2)
+
+            # ✅ Credit Memo logic
+            if order_type == "CM":
+                qty = -qty
+
+            line_amount = round(qty * unit_price, 2)
+            order_total += line_amount
+
+            line_rows.append({
                 "OrderNbr": order_nbr,
                 "LineNbr": line_nbr,
-                "InventoryID": f"ITEM-{random.randint(1000,9999)}",
-                "OrderQty": random.randint(1, 20),
-                "UnitPrice": round(random.uniform(10, 500), 2)
+                "InventoryID": inventory_id,
+                "Qty": qty,
+                "UnitPrice": unit_price,
+                "LineAmount": line_amount
             })
 
-    SALES_ORDER_LINES = pd.DataFrame(sales_order_lines)
+        # ✅ Financial Logic
+        tax_total = round(order_total * 0.08, 2) if order_type != "CM" else 0
+        freight = round(random.uniform(10, 100), 2) if order_type == "SO" else 0
+        grand_total = round(order_total + tax_total + freight, 2)
 
-    return pd.DataFrame(sales_orders_list)
+        if status == "Cancelled":
+            tax_total = 0
+            freight = 0
+            grand_total = 0
 
 
-def shipments(sales_orders_df, warehouse_df):
-    rows = []
-    used = set()
-
-    def gen_ship(date):
-        while True:
-            suf = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-            nbr = f"SHP-{date.year}-{suf}"
-            if nbr not in used:
-                used.add(nbr)
-                return nbr
-
-    def extract_branch(order_nbr):
-        # Example: SO-IN-BLR-2025-BKWK → IN-BLR
-        parts = order_nbr.split("-")
-        return "-".join(parts[1:3])
-
-    for _, so in sales_orders_df.iterrows():
-        ship_date = fake.date_between(so["OrderDate"], "today")
-        branch_cd = extract_branch(so["OrderNbr"])
-
-        # Filter warehouses belonging to same branch
-        eligible_wh = warehouse_df[
-            warehouse_df["WarehouseCD"].str.contains(branch_cd)
-        ]
-
-        # Fallback only if no warehouse exists for that branch
-        if eligible_wh.empty:
-            eligible_wh = warehouse_df
-
-        rows.append({
-            "ShipmentNbr": gen_ship(ship_date),
-            "OrderNbr": so["OrderNbr"],
-            "WarehouseCD": random.choice(eligible_wh["WarehouseCD"].tolist()),
-            "ShipmentDate": ship_date
+        header_rows.append({
+            "OrderNbr": order_nbr,
+            "OrderType": order_type,
+            "CustomerCD": customer,
+            "OrderDate": order_date.strftime("%d-%m-%Y"),
+            "BranchCD": branch_cd,
+            "Status": status,
+            "ShipVia": random.choice(ship_via_options),
+            "RequestedDate": requested_date_str,
+            "OrderTotal": round(order_total, 2),
+            "TaxTotal": tax_total,
+            "FreightAmount": freight,
+            "GrandTotal": grand_total
         })
 
-    return pd.DataFrame(rows)
+    sales_order_header_df = pd.DataFrame(header_rows)
+    sales_order_line_df = pd.DataFrame(line_rows)
+
+    return sales_order_header_df, sales_order_line_df
+
+
+def shipments(so_header_df, so_line_df):
+
+    shipment_headers = []
+    shipment_lines = []
+
+    def generate_shipment_nbr(order_nbr):
+        suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        return f"SHP-{order_nbr}-{suffix}"
+
+    so_line_grouped = so_line_df.groupby("OrderNbr")
+
+    for _, so in so_header_df.iterrows():
+
+        order_nbr = so["OrderNbr"]
+
+        if order_nbr not in so_line_grouped.groups:
+            continue
+
+        order_lines = so_line_grouped.get_group(order_nbr)
+
+        shipment_nbr = generate_shipment_nbr(order_nbr)
+
+        shipment_headers.append({
+            "ShipmentNbr": shipment_nbr,
+            "OrderNbr": order_nbr,
+            "BranchCD": so["BranchCD"],
+            "ShipmentDate": so["OrderDate"],
+            "Status": "Confirmed"
+        })
+
+        # 🔥 Generate Shipment LineNbr safely
+        for line_nbr, (_, line) in enumerate(order_lines.iterrows(), start=1):
+
+            shipment_lines.append({
+                "ShipmentNbr": shipment_nbr,
+                "LineNbr": line_nbr,  # ✅ NOW EXISTS
+                "OrderNbr": order_nbr,
+                "InventoryID": line["InventoryID"],
+                "Qty": line["Qty"]
+            })
+
+    return (
+        pd.DataFrame(shipment_headers),
+        pd.DataFrame(shipment_lines)
+    )
+
 
 
 def sales_invoices(customers_df, branch_df):
@@ -1299,6 +1359,8 @@ def bills(vendors_df, branch_df, receipts_df, purchase_orders_df):
         if not receipts_df.empty
         else {}
     )
+    receipt_rows = receipts_df.to_dict("records") if not receipts_df.empty else []
+
 
     def generate_ref_nbr(branch_cd, bill_date):
         while True:
@@ -1312,11 +1374,12 @@ def bills(vendors_df, branch_df, receipts_df, purchase_orders_df):
 
         vendor = vendors_df.sample(1).iloc[0]
 
-        link_to_receipt = not receipts_df.empty and random.random() < 0.65
+        link_to_receipt = receipt_rows and random.random() < 0.65
 
         if link_to_receipt:
-            receipt = receipts_df.sample(1).iloc[0]
+            receipt = random.choice(receipt_rows)
             receipt_nbr = receipt["ReceiptNbr"]
+
 
             # Branch must come from PO linked to receipt
             branch_cd = po_branch_map.get(
@@ -1708,8 +1771,19 @@ def main():
 
     # ------------------- TRANSACTIONS -------------------
     # Sales Orders, Shipments, Invoices
-    so   = deduplicate(sales_orders(cust, br), ["OrderNbr"], "SalesOrder")
-    shp  = deduplicate(shipments(so, wh), ["ShipmentNbr"], "Shipment")
+    # 1️⃣ Generate Sales Orders
+    # ---------------- SALES ORDERS ----------------
+    so_header, so_line = sales_orders(cust, br, stk)
+
+    so_header = deduplicate(so_header, ["OrderNbr"], "SalesOrderHeader")
+    so_line = deduplicate(so_line, ["OrderNbr", "LineNbr"], "SalesOrderLine")
+
+    # ---------------- SHIPMENTS ----------------
+    shp_header, shp_line = shipments(so_header, so_line)
+
+    shp_header = deduplicate(shp_header, ["ShipmentNbr"], "ShipmentHeader")
+    shp_line = deduplicate(shp_line, ["ShipmentNbr", "LineNbr"], "ShipmentLine")
+
     inv  = deduplicate(sales_invoices(cust, br), ["InvoiceNbr"], "SalesInvoice")
     # Purchase Orders, Receipts, Bills
 
@@ -1764,8 +1838,10 @@ def main():
         "Vendor.csv": vend,
         "Employee.csv": emp,
         "Project.csv": proj,
-        "SalesOrder.csv": so,
-        "Shipment.csv": shp,
+        "SalesOrderHeader.csv": so_header,
+        "SalesOrderLine.csv": so_line,
+        "ShipmentHeader.csv": shp_header,
+        "ShipmentLine.csv": shp_line,
         "SalesInvoice.csv": inv,
         "PurchaseOrder.csv": pol,
         "PurchaseReceipt.csv": pr,
