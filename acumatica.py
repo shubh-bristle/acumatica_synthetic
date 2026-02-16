@@ -13,7 +13,7 @@ fake = Faker()
 
 NUM_CURRENCIES = 50   #MasterData Increased quantity
 NUM_LEDGERS = 80      #MasterData Increased quantity
-NUM_BRANCHES = 100    #MasterData Increased quantity
+NUM_BRANCHES = 36    #MasterData Increased quantity
 NUM_WAREHOUSES = 200  #MasterData Increased quantity
 
 NUM_EMPLOYEES = 300
@@ -1266,45 +1266,44 @@ def bills(vendors_df, branch_df, receipts_df, purchase_orders_df):
     return pd.DataFrame(bills_list)
 
 
-def journal_transactions(
-    ledger_df, branch_df, account_df, subaccount_df, currency_df
-):
-    """
-    Generates realistic Journal Transactions linked to ledgers,
-    branches, accounts, and subaccounts.
-    """
+def journal_transactions(ledger_df, branch_df, account_df, subaccount_df, currency_df):
+    rows = []
 
-    journal_entries = []
-
-    actual_ledgers = ledger_df[
-        ledger_df["BalanceType"] == "Actual"
-    ]["LedgerCD"].tolist()
+    actual_ledgers = ledger_df[ledger_df["BalanceType"] == "Actual"]["LedgerCD"]
 
     for i in range(NUM_JOURNAL_TRANSACTIONS):
-        ledger_cd = random.choice(actual_ledgers)
-        branch_cd = random.choice(branch_df["BranchCD"])
-        account_cd = random.choice(account_df["AccountCD"])
-        subaccount_cd = random.choice(subaccount_df["SubAccountCD"])
+        batch_nbr = f"JB{i+1:06}"
+        amount = round(random.uniform(100, 5000), 2)
 
-        currency_id = weighted_currency_choice(currency_df)
-
-        debit = round(random.uniform(100, 5000), 2)
-        credit = debit
-
-        journal_entries.append({
-            "BatchNbr": f"JB{i+1:06}",
-            "LedgerCD": ledger_cd,
-            "BranchCD": branch_cd,
-            "AccountCD": account_cd,
-            "SubAccountCD": subaccount_cd,
-            "CurrencyID": currency_id,
-            "DebitAmt": debit,
-            "CreditAmt": credit,
-            "TransactionDate": fake.date_between(start_date="-12M", end_date="today"),
+        common_fields = {
+            "BatchNbr": batch_nbr,
+            "LedgerCD": random.choice(actual_ledgers),
+            "BranchCD": random.choice(branch_df["BranchCD"]),
+            "CurrencyID": weighted_currency_choice(currency_df),
+            "TransactionDate": fake.date_between("-12M", "today"),
             "Active": True
+        }
+
+        # Debit line (Expense / Asset)
+        rows.append({
+            **common_fields,
+            "AccountCD": random.choice(account_df["AccountCD"]),
+            "SubAccountCD": random.choice(subaccount_df["SubAccountCD"]),
+            "DebitAmt": amount,
+            "CreditAmt": 0
         })
 
-    return pd.DataFrame(journal_entries)
+        # Credit line (Cash / AP / Revenue)
+        rows.append({
+            **common_fields,
+            "AccountCD": random.choice(account_df["AccountCD"]),
+            "SubAccountCD": random.choice(subaccount_df["SubAccountCD"]),
+            "DebitAmt": 0,
+            "CreditAmt": amount
+        })
+
+    return pd.DataFrame(rows)
+
 
 def terms():
     rows = [
@@ -1625,11 +1624,14 @@ def main():
     )
 
     # General Ledger Transactions
-    gl   = deduplicate(
-    journal_transactions(led, br, acc, sub, cur),
-    ["BatchNbr", "AccountCD", "SubAccountCD", "TransactionDate"],
-    "JournalTransaction"
-)
+    gl = journal_transactions(led, br, acc, sub, cur)
+
+    check = gl.groupby("BatchNbr")[["DebitAmt", "CreditAmt"]].sum()
+    unbalanced = check[check["DebitAmt"] != check["CreditAmt"]]
+    assert unbalanced.empty, f"Unbalanced GL batches detected:\n{unbalanced.head()}"
+    assert (check["DebitAmt"] == check["CreditAmt"]).all()
+
+
 
     # ------------------- EXPORT -------------------
 
